@@ -23,3 +23,6 @@
 
 # Журнал настройки — реальные IP/пароли/токены/UUID. Шаблон см. setup.example.md
 setup.md
+
+# Реальный сервер (IP, email клиента) — свой инстанс, не шаблон. См. servers.example.json
+servers.json
