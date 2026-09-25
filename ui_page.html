@@ -1,0 +1,503 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>vpnctl</title>
+<style>
+  :root {
+    --фон: #101216; --панель: #191c22; --панель2: #21252d; --рамка: #2c313b;
+    --текст: #e7e9ee; --тусклый: #8b94a3; --акцент: #57c785; --тревога: #e5714f;
+    --жёлтый: #e0b341;
+  }
+  * { box-sizing: border-box; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, system-ui, sans-serif;
+    max-width: 940px; margin: 0 auto; padding: 1.5rem 1rem 4rem;
+    background: var(--фон); color: var(--текст); line-height: 1.45;
+  }
+  h1 { font-size: 1.25rem; margin: 0 0 1.2rem; display: flex; align-items: center; gap: .6rem; }
+  h2 { font-size: .95rem; margin: 0 0 .7rem; color: var(--тусклый); font-weight: 600;
+       text-transform: uppercase; letter-spacing: .04em; }
+  .панель { background: var(--панель); border: 1px solid var(--рамка);
+            border-radius: 12px; padding: 1.1rem; margin-bottom: 1.1rem; }
+
+  /* Главный блок туннеля */
+  .туннель-верх { display: flex; align-items: center; gap: 1rem; flex-wrap: wrap; }
+  .лампа { width: 12px; height: 12px; border-radius: 50%; background: #4a4f5a; flex: none;
+           box-shadow: 0 0 0 4px rgba(255,255,255,.03); }
+  .лампа.вкл { background: var(--акцент); box-shadow: 0 0 0 4px rgba(87,199,133,.15); }
+  .лампа.ошибка { background: var(--тревога); box-shadow: 0 0 0 4px rgba(229,113,79,.15); }
+  .крупно { font-size: 1.15rem; font-weight: 600; }
+  .ip { font-family: ui-monospace, SFMono-Regular, monospace; font-size: 1.05rem; }
+  .подпись { color: var(--тусклый); font-size: .82rem; }
+  .растяжка { flex: 1; }
+
+  button {
+    background: var(--панель2); color: var(--текст); border: 1px solid var(--рамка);
+    border-radius: 8px; padding: .42rem .8rem; cursor: pointer; font-size: .85rem;
+    font-family: inherit; transition: background .12s, border-color .12s;
+  }
+  button:hover:not(:disabled) { background: #2b3038; border-color: #3b414d; }
+  button:disabled { opacity: .45; cursor: default; }
+  button.главная { background: var(--акцент); border-color: var(--акцент); color: #08150e; font-weight: 600; }
+  button.главная:hover:not(:disabled) { background: #63d492; border-color: #63d492; }
+  button.опасная { background: transparent; border-color: #4a3630; color: #f0a48c; }
+  button.опасная:hover:not(:disabled) { background: #2b1f1c; }
+  button.мелкая { padding: .22rem .5rem; font-size: .78rem; }
+
+  select, input {
+    background: var(--панель2); border: 1px solid var(--рамка); color: var(--текст);
+    border-radius: 8px; padding: .4rem .55rem; font-size: .85rem; font-family: inherit;
+  }
+
+  /* Режимы — сегментированный переключатель */
+  .режимы { display: inline-flex; border: 1px solid var(--рамка); border-radius: 8px; overflow: hidden; }
+  .режимы button { border: none; border-radius: 0; border-right: 1px solid var(--рамка); }
+  .режимы button:last-child { border-right: none; }
+  .режимы button.активен { background: var(--акцент); color: #08150e; font-weight: 600; }
+
+  /* Узлы */
+  .узел { display: flex; align-items: center; gap: .7rem; padding: .55rem .7rem;
+          background: var(--панель2); border-radius: 8px; margin-bottom: .45rem; }
+  .узел.выбран { outline: 1px solid var(--акцент); }
+  .задержка { font-family: ui-monospace, monospace; font-size: .82rem; }
+  .задержка.быстро { color: var(--акцент); }
+  .задержка.средне { color: var(--жёлтый); }
+  .задержка.медленно { color: var(--тревога); }
+  .задержка.нет { color: var(--тусклый); }
+
+  /* Серверы и клиенты */
+  .сервер-шапка { display: flex; align-items: center; gap: .6rem; margin-bottom: .6rem; }
+  .инбаунд { background: var(--панель2); border-radius: 8px; padding: .7rem; margin-bottom: .6rem; }
+  .инбаунд-шапка { display: flex; align-items: center; gap: .5rem; flex-wrap: wrap;
+                   font-size: .85rem; margin-bottom: .5rem; }
+  .бейдж { background: #2c313b; color: var(--тусклый); border-radius: 5px;
+           padding: .08rem .45rem; font-size: .75rem; }
+  .клиент { border-top: 1px solid var(--рамка); padding-top: .55rem; margin-top: .55rem; }
+  .клиент:first-of-type { border-top: none; padding-top: 0; margin-top: 0; }
+  .клиент-строка { display: flex; align-items: center; gap: .55rem; flex-wrap: wrap; }
+  .ссылка { font-family: ui-monospace, monospace; font-size: .74rem; color: #7fd6b0;
+            word-break: break-all; background: #12161b; border-radius: 6px;
+            padding: .4rem .5rem; margin-top: .4rem; display: none; }
+  .ссылка.видна { display: block; }
+  .qr { margin-top: .45rem; display: none; }
+  .qr.видна { display: block; }
+  .qr img { width: 132px; height: 132px; image-rendering: pixelated; border-radius: 6px; background: #fff; }
+  .трафик { color: var(--тусклый); font-size: .78rem; font-family: ui-monospace, monospace; }
+
+  form.добавить { display: flex; gap: .5rem; flex-wrap: wrap; align-items: center; }
+  .сообщение { font-size: .82rem; color: var(--жёлтый); white-space: pre-wrap;
+               margin-top: .7rem; display: none; }
+  .сообщение.видно { display: block; }
+  .только-чтение { background: #3a3320; color: var(--жёлтый); padding: .12rem .5rem;
+                   border-radius: 5px; font-size: .72rem; font-weight: 500; }
+  .пусто { color: var(--тусклый); font-size: .85rem; }
+</style>
+</head>
+<body>
+  <h1>vpnctl <span id="бейдж-чтение" class="только-чтение" hidden>только чтение</span></h1>
+
+  <!-- Туннель -->
+  <div class="панель" id="панель-туннеля" hidden>
+    <div class="туннель-верх">
+      <span class="лампа" id="лампа"></span>
+      <div>
+        <div class="крупно" id="туннель-состояние">проверяю…</div>
+        <div class="подпись" id="туннель-узел">—</div>
+      </div>
+      <div class="растяжка"></div>
+      <div style="text-align:right">
+        <div class="ip" id="внешний-ip">—</div>
+        <div class="подпись">внешний адрес</div>
+      </div>
+    </div>
+
+    <div style="display:flex; gap:.6rem; flex-wrap:wrap; align-items:center; margin-top:1rem">
+      <select id="выбор-режима-запуска">
+        <option value="local">локальный (SOCKS, без root)</option>
+        <option value="tun">перехват (весь трафик)</option>
+      </select>
+      <button class="главная" id="кнопка-старт" onclick="стартТоннеля()">старт</button>
+      <button class="опасная" id="кнопка-стоп" onclick="стопТоннеля()">стоп</button>
+      <div class="растяжка"></div>
+      <div class="режимы" id="переключатель-режима"></div>
+    </div>
+    <div class="сообщение" id="сообщение-туннеля"></div>
+  </div>
+
+  <!-- Узлы -->
+  <div class="панель" id="панель-узлов" hidden>
+    <h2>Узлы</h2>
+    <div id="список-узлов"></div>
+    <button class="мелкая" onclick="замеритьВсё()" id="кнопка-замера">замерить задержки</button>
+  </div>
+
+  <!-- Внешние конфиги: чужие vless-ссылки, не с наших серверов -->
+  <div class="панель" id="панель-внешних" hidden>
+    <h2>Внешние конфиги</h2>
+    <div class="подпись" style="margin-bottom:.7rem">
+      Готовая vless-ссылка не с наших серверов — вставь, появится ещё одним вариантом среди узлов.
+    </div>
+    <form class="добавить" id="форма-внешний">
+      <input id="внешний-имя" placeholder="название" required style="max-width:12rem">
+      <input id="внешний-ссылка" placeholder="vless://..." required style="flex:1;min-width:16rem">
+      <button type="submit">добавить</button>
+    </form>
+    <div class="сообщение" id="сообщение-внешний"></div>
+    <div id="список-внешних" style="margin-top:.8rem"></div>
+  </div>
+
+  <!-- Серверы -->
+  <div class="панель">
+    <h2>Серверы и доступы</h2>
+    <div class="подпись" style="margin-bottom:.8rem">
+      собрано: <span id="время-сбора">—</span>
+      <button class="мелкая" onclick="обновитьРеестр()" style="margin-left:.4rem">обновить с серверов</button>
+    </div>
+    <form class="добавить" id="форма-добавить" hidden>
+      <input id="поле-имя" placeholder="имя нового доступа" required>
+      <input id="поле-дни" type="number" value="0" min="0" style="width:7.5rem" title="0 = бессрочно">
+      <button type="submit">добавить</button>
+    </form>
+    <div class="сообщение" id="сообщение-люди"></div>
+    <div id="список-серверов" style="margin-top:1rem"></div>
+  </div>
+
+<script>
+const ТОЛЬКО_ЧТЕНИЕ = __READ_ONLY__;
+const ТОКЕН = "__VPNCTL_TOKEN__";
+let ССЫЛКИ_ПО_КЛИЕНТУ = {};
+
+function заголовки(json) {
+  const h = ТОКЕН ? {"X-Vpnctl-Token": ТОКЕН} : {};
+  if (json) h["Content-Type"] = "application/json";
+  return h;
+}
+async function получить(путь) {
+  const r = await fetch(путь, {headers: заголовки()});
+  if (!r.ok) throw new Error(`${путь}: ${r.status}`);
+  return r.json();
+}
+async function послать(путь, тело) {
+  const r = await fetch(путь, {method: "POST", headers: заголовки(true),
+                               body: JSON.stringify(тело || {})});
+  return r.json();
+}
+function показать(идентификатор, текст) {
+  const el = document.getElementById(идентификатор);
+  el.textContent = текст || "";
+  el.classList.toggle("видно", Boolean(текст));
+}
+function классЗадержки(мс) {
+  if (мс === null || мс === undefined) return "нет";
+  if (мс < 200) return "быстро";
+  if (мс < 500) return "средне";
+  return "медленно";
+}
+function текстЗадержки(мс) {
+  return (мс === null || мс === undefined) ? "—" : `${мс} мс`;
+}
+function размер(байты) {
+  if (!байты) return "0";
+  const е = ["Б", "КБ", "МБ", "ГБ", "ТБ"];
+  let и = 0, з = байты;
+  while (з >= 1024 && и < е.length - 1) { з /= 1024; и++; }
+  return `${з.toFixed(з < 10 && и > 0 ? 1 : 0)} ${е[и]}`;
+}
+
+/* ---------- Туннель ---------- */
+async function обновитьТуннель() {
+  try {
+    const с = await получить("/api/tunnel/status");
+    document.getElementById("лампа").className = "лампа" + (с.запущен ? " вкл" : "");
+    document.getElementById("туннель-состояние").textContent = с.запущен ? "включён" : "выключен";
+    document.getElementById("туннель-узел").textContent = с.запущен
+      ? `режим: ${с.режим || "?"} · узел: ${с.активный_узел || "?"}`
+      : "трафик идёт мимо туннеля";
+    document.getElementById("кнопка-старт").disabled = с.запущен;
+    document.getElementById("кнопка-стоп").disabled = !с.запущен;
+    document.getElementById("панель-узлов").hidden = !с.запущен;
+    if (с.запущен) { обновитьУзлы(); }
+    обновитьIP();
+  } catch (e) {
+    document.getElementById("туннель-состояние").textContent = "морда не отвечает";
+    document.getElementById("лампа").className = "лампа ошибка";
+  }
+}
+async function обновитьIP() {
+  try {
+    const д = await получить("/api/ip");
+    document.getElementById("внешний-ip").textContent = д.ip || "—";
+  } catch (e) { document.getElementById("внешний-ip").textContent = "—"; }
+}
+async function стартТоннеля() {
+  показать("сообщение-туннеля", "запускаю…");
+  const режим = document.getElementById("выбор-режима-запуска").value;
+  const д = await послать("/api/tunnel/start", {режим});
+  показать("сообщение-туннеля", д.ок ? "" : (д.вывод || "не запустился"));
+  await обновитьТуннель();
+}
+async function стопТоннеля() {
+  показать("сообщение-туннеля", "останавливаю…");
+  const д = await послать("/api/tunnel/stop", {});
+  показать("сообщение-туннеля", д.ок ? "" : (д.вывод || "не остановился"));
+  await обновитьТуннель();
+}
+
+/* ---------- Узлы и режимы ---------- */
+async function обновитьУзлы() {
+  let д;
+  try { д = await получить("/api/nodes"); } catch (e) { return; }
+  if (!д.доступно) { document.getElementById("панель-узлов").hidden = true; return; }
+
+  // Переключатель режима — это группа "выбор" (авто / вручную / direct)
+  const выбор = д.группы.find(г => г.имя === "выбор");
+  const пере = document.getElementById("переключатель-режима");
+  пере.innerHTML = "";
+  if (выбор) {
+    for (const вариант of выбор.варианты) {
+      const b = document.createElement("button");
+      b.textContent = вариант;
+      b.className = вариант === выбор.выбрано ? "активен" : "";
+      b.onclick = () => выбратьВариант("выбор", вариант);
+      пере.appendChild(b);
+    }
+  }
+
+  // Узлы: задержка + «держаться этого узла»
+  const вручную = д.группы.find(г => г.имя === "вручную");
+  const список = document.getElementById("список-узлов");
+  список.innerHTML = "";
+  const реальные = д.узлы.filter(у => у.имя !== "direct");
+  if (!реальные.length) {
+    список.innerHTML = '<div class="пусто">узлов нет — сервер недоступен или у тебя нет на нём доступа</div>';
+    return;
+  }
+  for (const узел of реальные) {
+    const прикреплён = вручную && вручную.выбрано === узел.имя && выбор && выбор.выбрано === "вручную";
+    const div = document.createElement("div");
+    div.className = "узел" + (прикреплён ? " выбран" : "");
+    div.innerHTML = `
+      <span>${узел.имя}</span>
+      <span class="бейдж">${узел.тип}</span>
+      <span class="задержка ${классЗадержки(узел.задержка_мс)}">${текстЗадержки(узел.задержка_мс)}</span>
+      <span style="flex:1"></span>
+    `;
+    if (!ТОЛЬКО_ЧТЕНИЕ) {
+      const b = document.createElement("button");
+      b.className = "мелкая";
+      b.textContent = прикреплён ? "закреплён" : "держаться этого";
+      b.disabled = прикреплён;
+      b.onclick = async () => {
+        await послать("/api/nodes/select", {группа: "вручную", вариант: узел.имя});
+        await послать("/api/nodes/select", {группа: "выбор", вариант: "вручную"});
+        обновитьУзлы(); обновитьТуннель();
+      };
+      div.appendChild(b);
+    }
+    список.appendChild(div);
+  }
+}
+async function выбратьВариант(группа, вариант) {
+  await послать("/api/nodes/select", {группа, вариант});
+  обновитьУзлы(); обновитьТуннель();
+}
+async function замеритьВсё() {
+  const кнопка = document.getElementById("кнопка-замера");
+  кнопка.disabled = true; кнопка.textContent = "замеряю…";
+  try { await послать("/api/nodes/test", {}); } catch (e) {}
+  кнопка.disabled = false; кнопка.textContent = "замерить задержки";
+  обновитьУзлы();
+}
+
+/* ---------- Серверы, клиенты, ссылки ---------- */
+async function обновитьРеестр() {
+  показать("сообщение-люди", "опрашиваю серверы…");
+  await послать("/api/refresh", {});
+  показать("сообщение-люди", "");
+  загрузитьСостояние();
+}
+async function загрузитьСостояние() {
+  const [состояние, ссылки] = await Promise.all([
+    получить("/api/state"),
+    получить("/api/links").catch(() => []),
+  ]);
+  ССЫЛКИ_ПО_КЛИЕНТУ = {};
+  for (const з of ссылки) { ССЫЛКИ_ПО_КЛИЕНТУ[`${з.сервер}|${з.inbound_id}|${з.email}`] = з; }
+  отрисоватьСерверы(состояние);
+}
+function отрисоватьСерверы(состояние) {
+  document.getElementById("время-сбора").textContent = состояние.собрано || "—";
+  const корень = document.getElementById("список-серверов");
+  корень.innerHTML = "";
+  const серверы = Object.entries(состояние.серверы || {});
+  if (!серверы.length) { корень.innerHTML = '<div class="пусто">серверов нет</div>'; return; }
+
+  for (const [имя, сервер] of серверы) {
+    const блок = document.createElement("div");
+    блок.style.marginBottom = "1.2rem";
+    const флаг = сервер.метаданные?.флаг || "";
+    const живой = серверЖив(сервер);
+    блок.innerHTML = `<div class="сервер-шапка">
+        <span class="лампа ${живой ? "вкл" : "ошибка"}"></span>
+        <b>${флаг} ${имя}</b>
+        <span class="подпись">${живой ? (сервер.метаданные?.host || "") : "недоступен: " + (сервер.ошибка || "?")}</span>
+      </div>`;
+
+    const инбаунды = сервер.панель_3xui?.inbounds || [];
+    if (живой && !инбаунды.length) {
+      блок.insertAdjacentHTML("beforeend", '<div class="пусто">на сервере нет ни одного inbound</div>');
+    }
+    for (const иб of инбаунды) {
+      const клиенты = иб.клиенты_из_settings || [];
+      const трафик = {};
+      for (const т of (иб.клиенты_из_traffics || [])) { трафик[т.email] = т; }
+      const карточка = document.createElement("div");
+      карточка.className = "инбаунд";
+      карточка.innerHTML = `<div class="инбаунд-шапка">
+          <b>${иб.remark || иб.id}</b>
+          <span class="бейдж">${иб.протокол}/${иб.безопасность || "—"}</span>
+          <span class="бейдж">порт ${иб.порт}</span>
+          <span class="бейдж">${иб.включён ? "включён" : "выключен"}</span>
+          <span class="подпись">${клиенты.length} доступ(ов)</span>
+        </div>`;
+      for (const кл of клиенты) {
+        const email = кл.email;
+        const т = трафик[email] || {};
+        const ключ = `${имя}|${иб.id}|${email}`;
+        const запись = ССЫЛКИ_ПО_КЛИЕНТУ[ключ];
+        const строка = document.createElement("div");
+        строка.className = "клиент";
+        строка.innerHTML = `
+          <div class="клиент-строка">
+            <b>${email}</b>
+            <span class="трафик">↑${размер(т.up)} ↓${размер(т.down)}</span>
+            <span style="flex:1"></span>
+          </div>
+          <div class="ссылка" id="сс-${CSS.escape(ключ)}">${запись ? запись.ссылка : "ссылка не построена"}</div>
+          <div class="qr" id="qr-${CSS.escape(ключ)}">${запись && запись.qr
+              ? `<img src="data:image/png;base64,${запись.qr}">`
+              : '<span class="подпись">QR недоступен — поставь qrencode (brew install qrencode)</span>'}</div>
+        `;
+        const кнопки = строка.querySelector(".клиент-строка");
+        const bСс = document.createElement("button");
+        bСс.className = "мелкая"; bСс.textContent = "ссылка";
+        bСс.onclick = () => document.getElementById(`сс-${CSS.escape(ключ)}`).classList.toggle("видна");
+        кнопки.appendChild(bСс);
+        const bQr = document.createElement("button");
+        bQr.className = "мелкая"; bQr.textContent = "QR";
+        bQr.onclick = () => document.getElementById(`qr-${CSS.escape(ключ)}`).classList.toggle("видна");
+        кнопки.appendChild(bQr);
+        if (запись) {
+          const bКоп = document.createElement("button");
+          bКоп.className = "мелкая"; bКоп.textContent = "копировать";
+          bКоп.onclick = async () => {
+            await navigator.clipboard.writeText(запись.ссылка);
+            bКоп.textContent = "скопировано";
+            setTimeout(() => { bКоп.textContent = "копировать"; }, 1500);
+          };
+          кнопки.appendChild(bКоп);
+        }
+        if (!ТОЛЬКО_ЧТЕНИЕ) {
+          const bУд = document.createElement("button");
+          bУд.className = "мелкая опасная"; bУд.textContent = "убрать";
+          bУд.onclick = () => убрать(email.split("-")[0]);
+          кнопки.appendChild(bУд);
+        }
+        карточка.appendChild(строка);
+      }
+      блок.appendChild(карточка);
+    }
+    корень.appendChild(блок);
+  }
+}
+function серверЖив(сервер) { return Boolean(сервер.жив); }
+
+document.getElementById("форма-добавить").addEventListener("submit", async (e) => {
+  e.preventDefault();
+  const имя = document.getElementById("поле-имя").value.trim();
+  const дни = parseInt(document.getElementById("поле-дни").value || "0", 10);
+  if (!имя) return;
+  показать("сообщение-люди", `завожу «${имя}» на всех серверах…`);
+  const д = await послать("/api/people/add", {имя, дни});
+  показать("сообщение-люди", д.ок ? "" : (д.вывод || "не удалось"));
+  document.getElementById("поле-имя").value = "";
+  await обновитьРеестр();
+});
+async function убрать(имя) {
+  if (!confirm(`Убрать доступ «${имя}» со всех серверов?`)) return;
+  показать("сообщение-люди", `убираю «${имя}»…`);
+  const д = await послать("/api/people/remove", {имя});
+  показать("сообщение-люди", д.ок ? "" : (д.вывод || "не удалось"));
+  await обновитьРеестр();
+}
+
+/* ---------- Внешние конфиги ---------- */
+async function обновитьВнешние() {
+  let список;
+  try { список = await получить("/api/external"); } catch (e) { return; }
+  const корень = document.getElementById("список-внешних");
+  корень.innerHTML = "";
+  if (!список.length) {
+    корень.innerHTML = '<div class="пусто">пока ничего не добавлено</div>';
+    return;
+  }
+  for (const запись of список) {
+    const строка = document.createElement("div");
+    строка.className = "клиент";
+    строка.innerHTML = `
+      <div class="клиент-строка">
+        <b>${запись.название}</b>
+        <span class="подпись" style="font-family:ui-monospace,monospace">${запись.ссылка.slice(0, 60)}…</span>
+        <span style="flex:1"></span>
+      </div>`;
+    const bУд = document.createElement("button");
+    bУд.className = "мелкая опасная"; bУд.textContent = "убрать";
+    bУд.onclick = () => убратьВнешний(запись.название);
+    строка.querySelector(".клиент-строка").appendChild(bУд);
+    корень.appendChild(строка);
+  }
+}
+
+document.getElementById("форма-внешний").addEventListener("submit", async (e) => {
+  e.preventDefault();
+  const название = document.getElementById("внешний-имя").value.trim();
+  const ссылка = document.getElementById("внешний-ссылка").value.trim();
+  if (!название || !ссылка) return;
+  показать("сообщение-внешний", "проверяю ссылку…");
+  const д = await послать("/api/external/add", {название, ссылка});
+  if (!д.ок) {
+    показать("сообщение-внешний", д.ошибка || "не удалось разобрать ссылку");
+    return;
+  }
+  показать("сообщение-внешний", д.нужен_перезапуск
+    ? "добавлено — перезапусти туннель (стоп/старт), чтобы узел появился"
+    : "добавлено — появится при следующем старте туннеля");
+  document.getElementById("внешний-имя").value = "";
+  document.getElementById("внешний-ссылка").value = "";
+  await обновитьВнешние();
+});
+
+async function убратьВнешний(название) {
+  if (!confirm(`Убрать «${название}»?`)) return;
+  const д = await послать("/api/external/remove", {название});
+  показать("сообщение-внешний", д.ок && д.нужен_перезапуск
+    ? "убрано — перезапусти туннель, чтобы узел пропал из выбора" : "");
+  await обновитьВнешние();
+}
+
+/* ---------- Запуск ---------- */
+document.getElementById("бейдж-чтение").hidden = !ТОЛЬКО_ЧТЕНИЕ;
+document.getElementById("панель-туннеля").hidden = ТОЛЬКО_ЧТЕНИЕ;
+document.getElementById("форма-добавить").hidden = ТОЛЬКО_ЧТЕНИЕ;
+document.getElementById("панель-внешних").hidden = ТОЛЬКО_ЧТЕНИЕ;
+if (!ТОЛЬКО_ЧТЕНИЕ) {
+  обновитьТуннель();
+  setInterval(обновитьТуннель, 5000);
+  обновитьВнешние();
+}
+загрузитьСостояние();
+</script>
+</body>
+</html>

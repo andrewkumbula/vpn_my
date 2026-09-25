@@ -1,0 +1,75 @@
+#!/usr/bin/env bash
+# Всё, что требует root, — здесь и только здесь. После publish.sh этот файл лежит
+# в /usr/local/libexec/vpnctl/vpn-run, root:wheel, 755, и на него выдан NOPASSWD
+# sudo (см. /etc/sudoers.d/vpnctl). НИ ОДНОЙ ссылки на $HOME или Homebrew — иначе
+# NOPASSWD отдаёт root через подмену любого из них (инвариант №4 из промта).
+#
+# Замечание про переменные: bash в этом окружении не понимает кириллицу в левой
+# части присваивания (ИМЯ=значение тихо превращается в попытку запустить файл
+# "ИМЯ=значение"), поэтому переменные — латиницей. Команды, имена функций и
+# комментарии — по-русски, как договаривались.
+set -euo pipefail
+
+if [[ "$(id -u)" -ne 0 ]]; then
+  echo "vpn-run: нужен root — вызывай через sudo, не напрямую" >&2
+  exit 1
+fi
+
+BASE_DIR="/usr/local/libexec/vpnctl"
+SINGBOX_BIN="$BASE_DIR/bin/sing-box"
+TUN_CONFIG="$BASE_DIR/client-tun.json"
+STATE_DIR="$BASE_DIR/state"
+LOG_FILE="$STATE_DIR/sing-box.log"
+PID_FILE="$STATE_DIR/sing-box.pid"
+
+# Общий признак процесса, НЕ полный путь: экземпляр, запущенный из старого места
+# публикации (прошлой версии бандла), матчился бы неполным сравнением по-другому
+# и остался бы невидимым — грабля из промта, проверено на практике.
+PROC_PATTERN="sing-box run"
+
+mkdir -p "$STATE_DIR"
+
+старт-туннель() {
+  if pgrep -f "$PROC_PATTERN" >/dev/null 2>&1; then
+    echo "sing-box уже запущен"
+    return 0
+  fi
+  if [[ ! -x "$SINGBOX_BIN" ]]; then
+    echo "нет забандленного sing-box в $SINGBOX_BIN — сначала ./vpn опубликовать" >&2
+    return 1
+  fi
+  # Не запускаем демон вслепую — сначала показываем, что он вообще не поднимется.
+  local check_output
+  if ! check_output=$("$SINGBOX_BIN" check -c "$TUN_CONFIG" 2>&1); then
+    echo "sing-box check не прошёл, конфиг не поднимаю:" >&2
+    echo "$check_output" | head -5 >&2
+    return 1
+  fi
+  nohup "$SINGBOX_BIN" run -c "$TUN_CONFIG" >"$LOG_FILE" 2>&1 &
+  echo $! > "$PID_FILE"
+  chmod 644 "$PID_FILE" "$LOG_FILE"
+  sleep 1
+  if ! pgrep -f "$PROC_PATTERN" >/dev/null 2>&1; then
+    echo "sing-box не поднялся, хвост лога:" >&2
+    tail -20 "$LOG_FILE" >&2
+    return 1
+  fi
+  echo "запущен"
+}
+
+стоп-туннель() {
+  pkill -f "$PROC_PATTERN" 2>/dev/null || true
+  rm -f "$PID_FILE"
+  echo "остановлен"
+}
+
+CMD="${1:-}"
+case "$CMD" in
+  старт-туннель) старт-туннель ;;
+  стоп-туннель) стоп-туннель ;;
+  *)
+    echo "vpn-run: неизвестная команда '${CMD}'" >&2
+    echo "доступно: старт-туннель | стоп-туннель" >&2
+    exit 1
+    ;;
+esac

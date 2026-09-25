@@ -1,0 +1,318 @@
+#!/usr/bin/env bash
+# Входной скрипт. Команды на русском (см. §3 промта). Сам умеет только читать
+# состояние и звать python-скрипты рядом + привилегированную часть через sudo —
+# никакой логики, которая требует root, здесь не живёт (инвариант №1).
+#
+# Переменные — латиницей: bash в этом окружении не понимает кириллицу в левой
+# части присваивания (см. подробный комментарий в privileged/vpn-run).
+set -euo pipefail
+
+REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+STATE_DIR="${REPO_DIR}/state"
+PY="/usr/bin/python3"
+
+BASE_DIR_PRIV="/usr/local/libexec/vpnctl"
+VPN_RUN="${BASE_DIR_PRIV}/vpn-run"
+
+PROC_PATTERN="sing-box run"
+
+# Сравнение "поменялось ли реально что-то в конфиге" между локальной и
+# опубликованной (root-владение) копией: пути rulesets/cache в них разные по
+# построению (publish.sh их переписывает), поэтому голый shasum всегда бы
+# отличался — нормализуем пути на плейсхолдер перед хэшем.
+шасумма_без_путей() {
+  "$PY" -c "
+import json, hashlib, sys
+d = json.load(open(sys.argv[1], encoding='utf-8'))
+def normalize(obj):
+    if isinstance(obj, dict):
+        return {k: (('<путь>' if k in ('path',) else normalize(v))) for k, v in obj.items()}
+    if isinstance(obj, list):
+        return [normalize(v) for v in obj]
+    return obj
+print(hashlib.sha256(json.dumps(normalize(d), sort_keys=True).encode()).hexdigest())
+" "$1" 2>/dev/null || echo "нечитаемо"
+}
+
+SESSION_LOG="${STATE_DIR}/session.log"
+
+# Снимок сети до/после — специально после случая, когда чужой VPN (не наш
+# sing-box) держал default route через utun с тем же диапазоном адресов, что
+# наша морда, и было непонятно, откуда взялось "нет интернета". Пишем ДО и
+# ПОСЛЕ каждого старт/стоп — разница между снимками обычно и есть ответ.
+снимок_сети() {
+  local TITLE="$1"
+  {
+    echo "=== ${TITLE} — $(date -u '+%Y-%m-%dT%H:%M:%SZ') ==="
+    echo "-- utun с адресом (не только link-local) --"
+    ifconfig | awk '/^utun/{iface=$1} /inet /{if (iface) print iface, $0; }' | grep -v "fe80::" || true
+    echo "-- default-маршруты --"
+    netstat -rn -f inet 2>/dev/null | grep default || echo "(нет default-маршрута — это тоже плохо)"
+    echo "-- процессы sing-box --"
+    pgrep -fl "sing-box" || echo "(нет)"
+    echo
+  } >> "$SESSION_LOG" 2>&1
+}
+
+проверить_интернет() {
+  local DESC="$1"
+  local URL="${2:-https://www.gstatic.com/generate_204}"
+  local PROXY="${3:-}"
+  local CODE
+  if [[ -n "$PROXY" ]]; then
+    CODE=$(curl -s -m 6 --socks5 "$PROXY" "$URL" -o /dev/null -w "%{http_code}" 2>/dev/null || echo "0")
+  else
+    CODE=$(curl -s -m 6 "$URL" -o /dev/null -w "%{http_code}" 2>/dev/null || echo "0")
+  fi
+  echo "[${DESC}] ${URL}${PROXY:+ (через $PROXY)} → HTTP ${CODE}" >> "$SESSION_LOG"
+  [[ "$CODE" != "0" ]]
+}
+
+помощь() {
+  cat <<'EOF'
+./vpn старт                         — локальный режим (SOCKS 127.0.0.1:2080), без root
+./vpn перехват                      — полный перехват трафика (TUN), нужен sudo (см. ./vpn опубликовать)
+./vpn стоп                          — остановить, в каком бы режиме ни был поднят
+./vpn статус                        — жив ли, какой узел активен, сколько серверов доступно
+./vpn лог                           — хвост лога sing-box
+./vpn диагностика                   — сеть до/после старт-стоп, проверки интернета, не блокирует
+./vpn ссылки [--server X --protocol Y]  — клиентские ссылки из реального состояния
+./vpn обнови                        — собрать реестр (collect.py) + обновить списки маршрутизации
+./vpn конфиг <устройство>           — ссылки для конкретного заведённого устройства/человека
+./vpn морда                         — открыть локальную морду (мак, полный доступ)
+./vpn люди                          — список серверов/людей
+./vpn добавь <имя> [--days N]       — завести человека на всех серверах
+./vpn убери <имя>                   — убрать человека со всех серверов
+./vpn сторож [--поставить]          — присмотр за серверами: статус или установка
+./vpn опубликовать                  — перенести привилегированную часть в root-владение (publish.sh)
+EOF
+}
+
+требуется_publish() {
+  echo "нужно сначала: ./vpn опубликовать" >&2
+  exit 1
+}
+
+команда_старт() {
+  if pgrep -f "$PROC_PATTERN" >/dev/null 2>&1; then
+    echo "уже запущен"
+    return 0
+  fi
+  снимок_сети "до старта (локальный режим)"
+  "$PY" "${REPO_DIR}/render_client.py" --mode local
+  nohup sing-box run -c "${STATE_DIR}/client-local.json" \
+    > "${STATE_DIR}/sing-box-local.log" 2>&1 &
+  echo $! > "${STATE_DIR}/sing-box-local.pid"
+  sleep 1
+  if pgrep -f "$PROC_PATTERN" >/dev/null 2>&1; then
+    echo "запущен (локальный режим, SOCKS 127.0.0.1:2080)"
+    снимок_сети "после старта (локальный режим)"
+    проверить_интернет "прямой (мимо туннеля)" || true
+    if проверить_интернет "через туннель" "https://api.ipify.org" "127.0.0.1:2080"; then
+      echo "проверка: туннель отвечает — подробности в ./vpn лог"
+    else
+      echo "проверка: через туннель не ответил за 6с — подробности в ./vpn лог" >&2
+    fi
+  else
+    echo "не поднялся, хвост лога:" >&2
+    tail -20 "${STATE_DIR}/sing-box-local.log" >&2
+    снимок_сети "старт не удался (локальный режим)"
+    exit 1
+  fi
+}
+
+команда_перехват() {
+  if [[ ! -x "$VPN_RUN" ]]; then
+    требуется_publish
+  fi
+  if pgrep -f "$PROC_PATTERN" >/dev/null 2>&1; then
+    echo "уже запущен"
+    return 0
+  fi
+
+  # Чужой VPN, уже держащий default route через свой utun, конфликтует с нашим
+  # перехватом — ровно так однажды пропал интернет (два default-маршрута сразу,
+  # непонятно через какой реально уходит трафик). Не блокируем, только
+  # предупреждаем — решение за человеком.
+  OTHER_DEFAULT_ROUTES=$(netstat -rn -f inet 2>/dev/null | grep "^default" | grep -c "utun" || true)
+  if [[ "$OTHER_DEFAULT_ROUTES" -gt 0 ]]; then
+    echo "внимание: default-маршрут уже идёт через utun (другой VPN?) — два тоннеля с default route одновременно" >&2
+    echo "могут конфликтовать (так один раз пропадал интернет). Список сейчас:" >&2
+    netstat -rn -f inet 2>/dev/null | grep "^default" >&2
+  fi
+
+  снимок_сети "до старта (перехват)"
+  "$PY" "${REPO_DIR}/render_client.py" --mode tun --out "${STATE_DIR}/client-tun.json" >/dev/null
+  # publish.sh переписывает пути rulesets/cache в опубликованной копии — здесь
+  # мы пересобрали ЛОКАЛЬНУЮ (в репозитории) копию только для сверки; реально
+  # стартует sudo с УЖЕ опубликованной (root-владение) версией — ./vpn обнови
+  # само по себе её не обновляет, нужно переопубликовать.
+  PUBLISHED_CONFIG="${BASE_DIR_PRIV}/client-tun.json"
+  if [[ -f "$PUBLISHED_CONFIG" ]]; then
+    LOCAL_SUM=$(шасумма_без_путей "${STATE_DIR}/client-tun.json")
+    PUBLISHED_SUM=$(шасумма_без_путей "$PUBLISHED_CONFIG")
+    if [[ "$LOCAL_SUM" != "$PUBLISHED_SUM" ]]; then
+      # Раньше это было просто предупреждение — из-за этого однажды реально
+      # запустился перехват со старым конфигом (ещё с server_name эпохи Reality)
+      # и оборвал интернет: сертификат сервера не совпал с зашитым SNI. Полный
+      # перехват трафика — не то место, где можно молча продолжать со старой
+      # версией: останавливаем и требуем переопубликовать явно.
+      echo "СТОП: опубликованный конфиг отличается от текущего состояния реестра." >&2
+      echo "Перехват трафика со старой версией уже однажды рвал интернет (несовпадение SNI/сертификата)." >&2
+      echo "Сначала: ./vpn опубликовать" >&2
+      return 1
+    fi
+  fi
+  sudo "$VPN_RUN" старт-туннель
+  снимок_сети "после старта (перехват)"
+  if проверить_интернет "перехват — реальный трафик"; then
+    echo "проверка: интернет отвечает — подробности в ./vpn лог"
+  else
+    echo "проверка: интернет НЕ отвечает за 6с после перехвата — смотри ./vpn лог, возможно нужно ./vpn стоп" >&2
+  fi
+}
+
+команда_стоп() {
+  # Свой вывод у vpn-run глушим — этот скрипт печатает финальный результат сам,
+  # один раз, независимо от того, какая из веток (root/локальная) сработала.
+  # TUN-инстанс работает от root, и обычный pkill его НЕ убьёт — только эта
+  # ветка через sudo. Поэтому она первая и обязательная.
+  if [[ -x "$VPN_RUN" ]]; then
+    sudo -n "$VPN_RUN" стоп-туннель >/dev/null 2>&1 || true
+  fi
+  # Локальный режим (не root) убиваем сами — sudo выше мог ничего не найти.
+  if pgrep -f "$PROC_PATTERN" >/dev/null 2>&1; then
+    pkill -f "$PROC_PATTERN" 2>/dev/null || true
+  fi
+  rm -f "${STATE_DIR}/sing-box-local.pid"
+
+  # Ждём ФАКТИЧЕСКОГО завершения, а не просто отправки сигнала: без этого
+  # следующий `старт` видит ещё живой умирающий процесс, говорит "уже запущен"
+  # и молча ничего не запускает (ловилось вживую).
+  for _ in 1 2 3 4 5 6 7 8 9 10; do
+    pgrep -f "$PROC_PATTERN" >/dev/null 2>&1 || break
+    sleep 0.3
+  done
+
+  снимок_сети "после стоп"
+
+  if pgrep -f "$PROC_PATTERN" >/dev/null 2>&1; then
+    # Честно: не смогли. Обычно это root-инстанс без выданного NOPASSWD —
+    # раньше здесь всё равно печаталось "остановлен", и было непонятно,
+    # почему туннель продолжает работать.
+    echo "НЕ остановлен — процесс всё ещё жив:" >&2
+    pgrep -fl "$PROC_PATTERN" >&2
+    echo "если он запущен от root, нужен ./vpn опубликовать (NOPASSWD на vpn-run)" >&2
+    return 1
+  fi
+  echo "остановлен"
+}
+
+команда_статус() {
+  if ! pgrep -f "$PROC_PATTERN" >/dev/null 2>&1; then
+    echo "выключен"
+    return 0
+  fi
+  echo "запущен"
+  if CURL_OUT=$(curl -fsS --max-time 2 "http://127.0.0.1:9090/proxies/%D0%B2%D1%8B%D0%B1%D0%BE%D1%80" 2>/dev/null); then
+    ACTIVE=$(echo "$CURL_OUT" | "$PY" -c "import json,sys; print(json.load(sys.stdin).get('now','?'))" 2>/dev/null || echo "?")
+    echo "активный узел: ${ACTIVE}"
+  fi
+  if [[ -f "${STATE_DIR}/registry.json" ]]; then
+    "$PY" -c "
+import json
+d = json.load(open('${STATE_DIR}/registry.json', encoding='utf-8'))
+живых = sum(1 for s in d['серверы'].values() if s.get('жив'))
+print(f\"серверов доступно: {живых}/{len(d['серверы'])}  (собрано {d.get('собрано','?')})\")"
+  fi
+}
+
+команда_лог() {
+  if [[ -f "${STATE_DIR}/sing-box-local.log" ]]; then
+    tail -n 50 -f "${STATE_DIR}/sing-box-local.log"
+  elif [[ -f "${BASE_DIR_PRIV}/state/sing-box.log" ]]; then
+    tail -n 50 -f "${BASE_DIR_PRIV}/state/sing-box.log"
+  else
+    echo "логов нет — ничего не запускалось"
+  fi
+}
+
+команда_диагностика() {
+  # Что происходило при последних стартах/стопах: сеть до/после, реальные
+  # проверки интернета — не блокирует (в отличие от `лог`), просто печатает
+  # накопленное и выходит.
+  if [[ ! -f "$SESSION_LOG" ]]; then
+    echo "диагностики пока нет — ./vpn ни разу не запускал старт/перехват/стоп"
+    return 0
+  fi
+  tail -n 200 "$SESSION_LOG"
+}
+
+команда_обнови() {
+  "$PY" "${REPO_DIR}/collect.py"
+  bash "${REPO_DIR}/rulesets/update.sh"
+}
+
+команда_морда() {
+  if ! pgrep -f "ui_server.py" >/dev/null 2>&1; then
+    nohup "$PY" "${REPO_DIR}/ui_server.py" > "${STATE_DIR}/ui.log" 2>&1 &
+    sleep 0.5
+  fi
+  open "http://127.0.0.1:7890/" 2>/dev/null || echo "открой http://127.0.0.1:7890/"
+}
+
+главное() {
+  CMD="${1:-}"
+  shift || true
+  case "$CMD" in
+    старт) команда_старт ;;
+    перехват) команда_перехват ;;
+    стоп) команда_стоп ;;
+    статус) команда_статус ;;
+    лог) команда_лог ;;
+    диагностика) команда_диагностика ;;
+    ссылки) "$PY" "${REPO_DIR}/links.py" "$@" ;;
+    обнови) команда_обнови ;;
+    конфиг)
+      if [[ $# -lt 1 ]]; then echo "нужно имя устройства: ./vpn конфиг <устройство>" >&2; exit 1; fi
+      "$PY" "${REPO_DIR}/links.py" --email-prefix "$1"
+      ;;
+    морда) команда_морда ;;
+    люди) "$PY" "${REPO_DIR}/people.py" список ;;
+    добавь)
+      if [[ $# -lt 1 ]]; then echo "нужно имя: ./vpn добавь <имя> [--days N]" >&2; exit 1; fi
+      "$PY" "${REPO_DIR}/people.py" добавь "$@" --apply
+      ;;
+    убери)
+      if [[ $# -lt 1 ]]; then echo "нужно имя: ./vpn убери <имя>" >&2; exit 1; fi
+      "$PY" "${REPO_DIR}/people.py" убери "$1" --apply
+      ;;
+    сторож)
+      if [[ "${1:-}" == "--поставить" ]]; then
+        "$PY" -c "
+import json
+d = json.load(open('${REPO_DIR}/servers.json', encoding='utf-8'))
+print('\n'.join(s['имя'] for s in d['servers']))" | while read -r SERVER_NAME; do
+          "$PY" "${REPO_DIR}/watch_deploy.py" "$SERVER_NAME" --apply
+        done
+      else
+        echo "статус присмотра (--поставить, чтобы установить на все серверы):"
+        "$PY" -c "
+import json
+d = json.load(open('${REPO_DIR}/servers.json', encoding='utf-8'))
+print('\n'.join(s['имя'] for s in d['servers']))" | while read -r SERVER_NAME; do
+          echo "  ${SERVER_NAME}: ssh на сервер и смотри /var/lib/vpnctl-watch/watch.log"
+        done
+      fi
+      ;;
+    опубликовать) bash "${REPO_DIR}/publish.sh" ;;
+    ""|помощь|help|-h|--help) помощь ;;
+    *)
+      echo "неизвестная команда '${CMD}'" >&2
+      помощь >&2
+      exit 1
+      ;;
+  esac
+}
+
+главное "$@"

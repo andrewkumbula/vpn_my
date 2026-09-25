@@ -1,0 +1,25 @@
+# Состояние, реестр, конфиги — восстанавливаются из servers.json + collect.py,
+# но содержат ключи/UUID клиентов — в репозиторий не идут.
+/state/*
+!/state/.gitkeep
+
+*.log
+*.pid
+
+# Секреты корпоративного профиля (если появится) — в Keychain, не в файле.
+*.ovpn
+
+# Скачанные списки маршрутизации — восстанавливаются rulesets/update.sh
+/rulesets/*.srs
+
+# macOS
+.DS_Store
+
+# Веб-панель clash (metacubexd) — скачивается rulesets/update.sh, не исходник
+/ui-panel/
+
+# Собранное приложение — артефакт, пересобирается app/build.sh
+/app/vpnctl.app/
+
+# Журнал настройки — реальные IP/пароли/токены/UUID. Шаблон см. setup.example.md
+setup.md
